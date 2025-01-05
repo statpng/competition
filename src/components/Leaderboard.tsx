@@ -9,6 +9,7 @@ const Leaderboard = () => {
   });
   const [groundTruth, setGroundTruth] = useState(null);
   const [submissions, setSubmissions] = useState([]);
+  const [submissionData, setSubmissionData] = useState({});
   const [selectedMetric, setSelectedMetric] = useState('rmse');
   const [error, setError] = useState('');
 
@@ -61,6 +62,38 @@ const Leaderboard = () => {
     }
   };
 
+  // 점수 재계산 함수
+  const recalculateScores = (submissions, truth) => {
+    if (!truth) return;
+
+    const recalculatedSubmissions = Object.entries(submissions).map(([teamName, data]) => {
+      const predictions = data.predictions;
+
+      const scores = Object.keys(METRICS).reduce((acc, metric) => {
+        acc[metric] = METRICS[metric].calculate(predictions, truth);
+        return acc;
+      }, {});
+
+      return {
+        teamName,
+        ...scores,
+        submitTime: data.submitTime,
+        predictionsCount: predictions.length
+      };
+    });
+
+    const sortedSubmissions = recalculatedSubmissions
+      .sort((a, b) => {
+        return METRICS[selectedMetric].higherIsBetter
+          ? b[selectedMetric] - a[selectedMetric]
+          : a[selectedMetric] - b[selectedMetric];
+      })
+      .map((sub, index) => ({ ...sub, rank: index + 1 }));
+
+    setSubmissions(sortedSubmissions);
+    localStorage.setItem('submissions', JSON.stringify(sortedSubmissions));
+  };
+
   // 페이지 로드시 데이터 복원
   useEffect(() => {
     const savedUserType = localStorage.getItem('userType');
@@ -78,9 +111,15 @@ const Leaderboard = () => {
       setGroundTruth(JSON.parse(savedGroundTruth));
     }
 
-    const savedSubmissions = localStorage.getItem('submissions');
-    if (savedSubmissions) {
-      setSubmissions(JSON.parse(savedSubmissions));
+    const savedSubmissionData = localStorage.getItem('submissionData');
+    if (savedSubmissionData) {
+      const parsedData = JSON.parse(savedSubmissionData);
+      setSubmissionData(parsedData);
+
+      // 저장된 제출 데이터가 있으면 점수 재계산
+      if (savedGroundTruth) {
+        recalculateScores(parsedData, JSON.parse(savedGroundTruth));
+      }
     }
 
     const savedSelectedMetric = localStorage.getItem('selectedMetric');
@@ -127,8 +166,6 @@ const Leaderboard = () => {
     setIsAdmin(false);
     setUserType(null);
     setLoginData({ username: '', password: '' });
-
-    // 로컬 스토리지에서 관리자 관련 데이터 제거
     localStorage.removeItem('isAdmin');
     localStorage.removeItem('userType');
   };
@@ -144,10 +181,14 @@ const Leaderboard = () => {
       }
 
       setGroundTruth(values);
-      setSubmissions([]);
-      setError('');
-
       localStorage.setItem('groundTruth', JSON.stringify(values));
+
+      // 기존 제출 데이터가 있으면 점수 재계산
+      if (Object.keys(submissionData).length > 0) {
+        recalculateScores(submissionData, values);
+      }
+
+      setError('');
       return true;
     } catch (err) {
       setError('정답 파일 처리 오류: ' + err.message);
@@ -173,30 +214,22 @@ const Leaderboard = () => {
         throw new Error(`예측값 개수(${predictions.length})가 정답 개수(${groundTruth.length})와 다릅니다`);
       }
 
-      const scores = Object.keys(METRICS).reduce((acc, metric) => {
-        acc[metric] = METRICS[metric].calculate(predictions, groundTruth);
-        return acc;
-      }, {});
-
       const teamName = filename.split('.')[0];
-      const newSubmissions = submissions.filter(sub => sub.teamName !== teamName);
-      newSubmissions.push({
-        teamName,
-        ...scores,
-        submitTime: new Date().toLocaleString(),
-        predictionsCount: predictions.length
-      });
 
-      const sortedSubmissions = newSubmissions
-        .sort((a, b) => {
-          return METRICS[selectedMetric].higherIsBetter
-            ? b[selectedMetric] - a[selectedMetric]
-            : a[selectedMetric] - b[selectedMetric];
-        })
-        .map((sub, index) => ({ ...sub, rank: index + 1 }));
+      // 원본 예측값 저장
+      const newSubmissionData = {
+        ...submissionData,
+        [teamName]: {
+          predictions,
+          submitTime: new Date().toLocaleString()
+        }
+      };
 
-      setSubmissions(sortedSubmissions);
-      localStorage.setItem('submissions', JSON.stringify(sortedSubmissions));
+      setSubmissionData(newSubmissionData);
+      localStorage.setItem('submissionData', JSON.stringify(newSubmissionData));
+
+      // 점수 계산 및 리더보드 업데이트
+      recalculateScores(newSubmissionData, groundTruth);
       setError('');
     } catch (err) {
       setError('제출 파일 처리 오류: ' + err.message);
@@ -323,6 +356,10 @@ const Leaderboard = () => {
                 onClick={() => {
                   setSelectedMetric(key);
                   localStorage.setItem('selectedMetric', key);
+                  // 메트릭이 변경되면 현재 submissionData로 점수 재계산
+                  if (groundTruth && Object.keys(submissionData).length > 0) {
+                    recalculateScores(submissionData, groundTruth);
+                  }
                 }}
                 className={`px-3 py-1 mx-1 rounded text-sm ${
                   selectedMetric === key
@@ -336,230 +373,234 @@ const Leaderboard = () => {
           </div>
 
           {/* 리더보드 테이블 */}
-          <table className="w-full">
-            <thead>
-              <tr className="bg-gray-100 border-b">
-                <th className="p-4 text-left">순위</th>
-                <th className="p-4 text-left">팀 이름</th>
-                <th className="p-4 text-left">
-                  점수 ({METRICS[selectedMetric].name})
-                </th>
-                <th className="p-4 text-left">제출 시간</th>
-              </tr>
-            </thead>
-            <tbody>
-              {submissions.map((submission, index) => (
-                <tr
-                  key={index}
-                  className={`
-                    border-b hover:bg-gray-50 transition-colors
-                    ${index < 3 ? 'bg-blue-50' : ''}
-                  `}
-                >
-                  <td className="p-4">
-                    <span className={`
-                      font-medium
-                      ${index === 0 ? 'text-yellow-500' : ''}
-                      ${index === 1 ? 'text-gray-500' : ''}
-                      ${index === 2 ? 'text-amber-600' : ''}
-                    `}>
-                      {submission.rank}
-                    </span>
-                  </td>
-                  <td className="p-4 font-medium">{submission.teamName}</td>
-                  <td className="p-4">
-                    {METRICS[selectedMetric].format(submission[selectedMetric])}
-                  </td>
-                  <td className="p-4 text-gray-600">{submission.submitTime}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {/* 뒤로가기 버튼 */}
-          <div className="mt-6 text-center">
-            <button
-              onClick={() => setUserType(null)}
-              className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                    <table className="w-full">
+                      <thead>
+                        <tr className="bg-gray-100 border-b">
+                          <th className="p-4 text-left">순위</th>
+                          <th className="p-4 text-left">팀 이름</th>
+                          <th className="p-4 text-left">
+                            점수 ({METRICS[selectedMetric].name})
+                          </th>
+                          <th className="p-4 text-left">제출 시간</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {submissions.map((submission, index) => (
+                          <tr
+                            key={index}
+                            className={`
+                              border-b hover:bg-gray-50 transition-colors
+                              ${index < 3 ? 'bg-blue-50' : ''}
+                            `}
                           >
-                            처음 화면으로
-                          </button>
-                        </div>
-                      </div>
+                            <td className="p-4">
+                              <span className={`
+                                font-medium
+                                ${index === 0 ? 'text-yellow-500' : ''}
+                                ${index === 1 ? 'text-gray-500' : ''}
+                                ${index === 2 ? 'text-amber-600' : ''}
+                              `}>
+                                {submission.rank}
+                              </span>
+                            </td>
+                            <td className="p-4 font-medium">{submission.teamName}</td>
+                            <td className="p-4">
+                              {METRICS[selectedMetric].format(submission[selectedMetric])}
+                            </td>
+                            <td className="p-4 text-gray-600">{submission.submitTime}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+
+                    {/* 뒤로가기 버튼 */}
+                    <div className="mt-6 text-center">
+                      <button
+                        onClick={() => setUserType(null)}
+                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                      >
+                        처음 화면으로
+                      </button>
                     </div>
                   </div>
-                );
+                </div>
+              </div>
+            );
 
-                // 관리자 페이지
-                const AdminView = () => (
-                  <div className="min-h-screen bg-gray-100 py-6 flex flex-col justify-center sm:py-12">
-                    <div className="relative py-3 sm:max-w-4xl sm:mx-auto">
-                      <div className="absolute inset-0 bg-gradient-to-r from-blue-300 to-blue-600 shadow-lg transform -skew-y-6 sm:skew-y-0 sm:-rotate-6 sm:rounded-3xl"></div>
-                      <div className="relative px-4 py-10 bg-white shadow-lg sm:rounded-3xl sm:p-20">
-                        <div className="max-w-md mx-auto">
-                          <div className="flex justify-between items-center mb-6">
-                            <h1 className="text-2xl font-bold text-center text-gray-800">
-                              데이터분석 경진대회 관리
-                            </h1>
+            // 관리자 페이지
+            const AdminView = () => (
+              <div className="min-h-screen bg-gray-100 py-6 flex flex-col justify-center sm:py-12">
+                <div className="relative py-3 sm:max-w-4xl sm:mx-auto">
+                  <div className="absolute inset-0 bg-gradient-to-r from-blue-300 to-blue-600 shadow-lg transform -skew-y-6 sm:skew-y-0 sm:-rotate-6 sm:rounded-3xl"></div>
+                  <div className="relative px-4 py-10 bg-white shadow-lg sm:rounded-3xl sm:p-20">
+                    <div className="max-w-md mx-auto">
+                      <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-2xl font-bold text-center text-gray-800">
+                          데이터분석 경진대회 관리
+                        </h1>
+                        <button
+                          onClick={handleAdminLogout}
+                          className="text-red-500 hover:text-red-700 font-medium"
+                        >
+                          로그아웃
+                        </button>
+                      </div>
+
+                      {/* 정답 파일 업로드 */}
+                      <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200 mb-4">
+                        <h3 className="font-medium mb-2 text-yellow-800">정답 파일 업로드 (관리자 전용)</h3>
+                        <label className="cursor-pointer inline-block bg-yellow-500 text-white px-4 py-2 rounded hover:bg-yellow-600">
+                          정답 파일 선택
+                          <input
+                            type="file"
+                            className="hidden"
+                            accept=".csv"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = (e) => processGroundTruth(e.target.result);
+                                reader.readAsText(file);
+                              }
+                            }}
+                          />
+                        </label>
+                        {groundTruth && (
+                          <p className="mt-2 text-sm text-green-600">
+                            ✓ 정답 파일 설정 완료 (샘플 수: {groundTruth.length})
+                          </p>
+                        )}
+                      </div>
+
+                      {/* 에러 메시지 */}
+                      {error && (
+                        <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-lg mb-4">
+                          {error}
+                        </div>
+                      )}
+
+                      {/* 평가 지표 선택 */}
+                      <div className="bg-white p-4 rounded-lg border mb-4">
+                        <h3 className="font-medium mb-2">평가 지표 선택</h3>
+                        <div className="flex flex-wrap gap-2">
+                          {Object.entries(METRICS).map(([key, metric]) => (
                             <button
-                              onClick={handleAdminLogout}
-                              className="text-red-500 hover:text-red-700 font-medium"
+                              key={key}
+                              onClick={() => {
+                                setSelectedMetric(key);
+                                localStorage.setItem('selectedMetric', key);
+                                // 메트릭이 변경되면 현재 submissionData로 점수 재계산
+                                if (groundTruth && Object.keys(submissionData).length > 0) {
+                                  recalculateScores(submissionData, groundTruth);
+                                }
+                              }}
+                              className={`px-3 py-1 rounded text-sm ${
+                                selectedMetric === key
+                                  ? 'bg-blue-500 text-white'
+                                  : 'bg-gray-100 hover:bg-gray-200'
+                              }`}
                             >
-                              로그아웃
+                              {metric.name}
                             </button>
-                          </div>
-
-                          {/* 정답 파일 업로드 */}
-                          <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200 mb-4">
-                            <h3 className="font-medium mb-2 text-yellow-800">정답 파일 업로드 (관리자 전용)</h3>
-                            <label className="cursor-pointer inline-block bg-yellow-500 text-white px-4 py-2 rounded hover:bg-yellow-600">
-                              정답 파일 선택
-                              <input
-                                type="file"
-                                className="hidden"
-                                accept=".csv"
-                                onChange={(e) => {
-                                  const file = e.target.files?.[0];
-                                  if (file) {
-                                    const reader = new FileReader();
-                                    reader.onload = (e) => processGroundTruth(e.target.result);
-                                    reader.readAsText(file);
-                                  }
-                                }}
-                              />
-                            </label>
-                            {groundTruth && (
-                              <p className="mt-2 text-sm text-green-600">
-                                ✓ 정답 파일 설정 완료 (샘플 수: {groundTruth.length})
-                              </p>
-                            )}
-                          </div>
-
-                          {/* 에러 메시지 */}
-                          {error && (
-                            <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-lg mb-4">
-                              {error}
-                            </div>
-                          )}
-
-                          {/* 평가 지표 선택 */}
-                          <div className="bg-white p-4 rounded-lg border mb-4">
-                            <h3 className="font-medium mb-2">평가 지표 선택</h3>
-                            <div className="flex flex-wrap gap-2">
-                              {Object.entries(METRICS).map(([key, metric]) => (
-                                <button
-                                  key={key}
-                                  onClick={() => {
-                                    setSelectedMetric(key);
-                                    localStorage.setItem('selectedMetric', key);
-                                  }}
-                                  className={`px-3 py-1 rounded text-sm ${
-                                    selectedMetric === key
-                                      ? 'bg-blue-500 text-white'
-                                      : 'bg-gray-100 hover:bg-gray-200'
-                                  }`}
-                                >
-                                  {metric.name}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-
-                          {/* 제출 파일 업로드 */}
-                          <div className="bg-white p-4 rounded-lg border mb-4">
-                            <h3 className="font-medium mb-2">팀 제출 파일 업로드</h3>
-                            <label className="cursor-pointer inline-block bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
-                              제출 파일 선택
-                              <input
-                                type="file"
-                                className="hidden"
-                                accept=".csv"
-                                multiple
-                                onChange={(e) => {
-                                  Array.from(e.target.files || []).forEach(file => {
-                                    const reader = new FileReader();
-                                    reader.onload = (e) => processSubmission(e.target.result, file.name);
-                                    reader.readAsText(file);
-                                  });
-                                }}
-                              />
-                            </label>
-                            <p className="mt-2 text-sm text-gray-600">
-                              * 파일명이 팀 이름으로 사용됩니다 (예: TeamA.csv)
-                            </p>
-                          </div>
-
-                          {/* 리더보드 테이블 */}
-                          <div className="overflow-x-auto bg-white rounded-lg shadow">
-                            <table className="w-full">
-                              <thead className="bg-gray-100 border-b">
-                                <tr>
-                                  <th className="p-4 text-left">순위</th>
-                                  <th className="p-4 text-left">팀 이름</th>
-                                  <th className="p-4 text-left">
-                                    점수 ({METRICS[selectedMetric].name})
-                                  </th>
-                                  <th className="p-4 text-left">제출 시간</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {submissions.map((submission, index) => (
-                                  <tr
-                                    key={index}
-                                    className={`
-                                      border-b hover:bg-gray-50 transition-colors
-                                      ${index < 3 ? 'bg-blue-50' : ''}
-                                    `}
-                                  >
-                                    <td className="p-4">
-                                      <span className={`
-                                        font-medium
-                                        ${index === 0 ? 'text-yellow-500' : ''}
-                                        ${index === 1 ? 'text-gray-500' : ''}
-                                        ${index === 2 ? 'text-amber-600' : ''}
-                                      `}>
-                                        {submission.rank}
-                                      </span>
-                                    </td>
-                                    <td className="p-4 font-medium">{submission.teamName}</td>
-                                    <td className="p-4">
-                                      {METRICS[selectedMetric].format(submission[selectedMetric])}
-                                    </td>
-                                    <td className="p-4 text-gray-600">{submission.submitTime}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
+                          ))}
                         </div>
+                      </div>
+
+                      {/* 제출 파일 업로드 */}
+                      <div className="bg-white p-4 rounded-lg border mb-4">
+                        <h3 className="font-medium mb-2">팀 제출 파일 업로드</h3>
+                        <label className="cursor-pointer inline-block bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
+                          제출 파일 선택
+                          <input
+                            type="file"
+                            className="hidden"
+                            accept=".csv"
+                            multiple
+                            onChange={(e) => {
+                              Array.from(e.target.files || []).forEach(file => {
+                                const reader = new FileReader();
+                                reader.onload = (e) => processSubmission(e.target.result, file.name);
+                                reader.readAsText(file);
+                              });
+                            }}
+                          />
+                        </label>
+                        <p className="mt-2 text-sm text-gray-600">
+                          * 파일명이 팀 이름으로 사용됩니다 (예: TeamA.csv)
+                        </p>
+                      </div>
+
+                      {/* 리더보드 테이블 */}
+                      <div className="overflow-x-auto bg-white rounded-lg shadow">
+                        <table className="w-full">
+                          <thead className="bg-gray-100 border-b">
+                            <tr>
+                              <th className="p-4 text-left">순위</th>
+                              <th className="p-4 text-left">팀 이름</th>
+                              <th className="p-4 text-left">
+                                점수 ({METRICS[selectedMetric].name})
+                              </th>
+                              <th className="p-4 text-left">제출 시간</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {submissions.map((submission, index) => (
+                              <tr
+                                key={index}
+                                className={`
+                                  border-b hover:bg-gray-50 transition-colors
+                                  ${index < 3 ? 'bg-blue-50' : ''}
+                                `}
+                              >
+                                <td className="p-4">
+                                  <span className={`
+                                    font-medium
+                                    ${index === 0 ? 'text-yellow-500' : ''}
+                                    ${index === 1 ? 'text-gray-500' : ''}
+                                    ${index === 2 ? 'text-amber-600' : ''}
+                                  `}>
+                                    {submission.rank}
+                                  </span>
+                                </td>
+                                <td className="p-4 font-medium">{submission.teamName}</td>
+                                <td className="p-4">
+                                  {METRICS[selectedMetric].format(submission[selectedMetric])}
+                                </td>
+                                <td className="p-4 text-gray-600">{submission.submitTime}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
                     </div>
                   </div>
-                );
+                </div>
+              </div>
+            );
 
-                // 메인 렌더링 로직
-                const renderContent = () => {
-                  if (!userType) {
-                    return <UserTypeSelection />;
-                  }
+            // 메인 렌더링 로직
+            const renderContent = () => {
+              if (!userType) {
+                return <UserTypeSelection />;
+              }
 
-                  if (userType === 'admin') {
-                    if (!isAdmin) {
-                      return <AdminLoginView />;
-                    }
-                    return <AdminView />;
-                  }
+              if (userType === 'admin') {
+                if (!isAdmin) {
+                  return <AdminLoginView />;
+                }
+                return <AdminView />;
+              }
 
-                  if (userType === 'participant') {
-                    return <ParticipantView />;
-                  }
-                };
+              if (userType === 'participant') {
+                return <ParticipantView />;
+              }
+            };
 
-                return (
-                  <div>
-                    {renderContent()}
-                  </div>
-                );
-              };
+            return (
+              <div>
+                {renderContent()}
+              </div>
+            );
+          };
 
-              export default Leaderboard;
+          export default Leaderboard;
